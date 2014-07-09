@@ -3,8 +3,7 @@ package Plack::Request;
 use strict;
 use warnings;
 use 5.008_001;
-our $VERSION = '1.0003';
-$VERSION = eval $VERSION;
+our $VERSION = '1.0030';
 
 use HTTP::Headers;
 use Carp ();
@@ -12,7 +11,7 @@ use Hash::MultiValue;
 use HTTP::Body;
 
 use Plack::Request::Upload;
-use Plack::TempBuffer;
+use Stream::Buffered;
 use URI;
 use URI::Escape ();
 
@@ -62,7 +61,7 @@ sub cookies {
     $self->env->{'plack.cookie.string'} = $self->env->{HTTP_COOKIE};
 
     my %results;
-    my @pairs = grep /=/, split "[;,] ?", $self->env->{'plack.cookie.string'};
+    my @pairs = grep m/=/, split "[;,] ?", $self->env->{'plack.cookie.string'};
     for my $pair ( @pairs ) {
         # trim leading trailing whitespace
         $pair =~ s/^\s+//; $pair =~ s/\s+$//;
@@ -78,10 +77,30 @@ sub cookies {
 
 sub query_parameters {
     my $self = shift;
-    my @combined = $self->uri->query_form;
-    @combined = (@combined, map { $_, '' } $self->uri->query_keywords);
+    $self->env->{'plack.request.query'} ||= $self->_parse_query;
+}
 
-    $self->env->{'plack.request.query'} ||= Hash::MultiValue->new(@combined);
+sub _parse_query {
+    my $self = shift;
+
+    my @query;
+    my $query_string = $self->env->{QUERY_STRING};
+    if (defined $query_string) {
+        if ($query_string =~ /=/) {
+            # Handle  ?foo=bar&bar=foo type of query
+            @query =
+                map { s/\+/ /g; URI::Escape::uri_unescape($_) }
+                map { /=/ ? split(/=/, $_, 2) : ($_ => '')}
+                split(/[&;]/, $query_string);
+        } else {
+            # Handle ...?dog+bones type of query
+            @query =
+                map { (URI::Escape::uri_unescape($_), '') }
+                split(/\+/, $query_string, -1);
+        }
+    }
+
+    Hash::MultiValue->new(@query);
 }
 
 sub content {
@@ -92,7 +111,9 @@ sub content {
     }
 
     my $fh = $self->input                 or return '';
-    my $cl = $self->env->{CONTENT_LENGTH} or return'';
+    my $cl = $self->env->{CONTENT_LENGTH} or return '';
+
+    $fh->seek(0, 0); # just in case middleware/apps read it without seeking back
     $fh->read(my($content), $cl, 0);
     $fh->seek(0, 0);
 
@@ -252,7 +273,7 @@ sub _parse_request_body {
         # Just in case if input is read by middleware/apps beforehand
         $input->seek(0, 0);
     } else {
-        $buffer = Plack::TempBuffer->new($cl);
+        $buffer = Stream::Buffered->new($cl);
     }
 
     my $spin = 0;
@@ -298,4 +319,4 @@ sub _make_upload {
 1;
 __END__
 
-#line 664
+#line 691
